@@ -1,4 +1,4 @@
-﻿# ============================================================
+# ============================================================
 #  Hamachi Monitor - Installer
 #  by Aaron Galarza — github.com/Aaron-Galarza
 #
@@ -6,9 +6,14 @@
 #  iex (iwr "https://raw.githubusercontent.com/Aaron-Galarza/hamachi-monitor/main/install.ps1").Content
 # ============================================================
 
+if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]"Administrator")) {
+    Start-Process powershell -Verb RunAs -ArgumentList "-NoProfile -ExecutionPolicy Bypass -Command `"iex (iwr 'https://raw.githubusercontent.com/Aaron-Galarza/HamachiMonitor/main/install.ps1').Content`""
+    exit
+}
+
 $BASE      = "C:\HamachiMonitor"
 $BIN       = "$BASE\bin"
-$REPO      = "https://raw.githubusercontent.com/Aaron-Galarza/hamachi-monitor/main"
+$REPO      = "https://raw.githubusercontent.com/Aaron-Galarza/HamachiMonitor/main"
 $TASK_NAME = "HamachiWatchdog"
 
 Write-Host ""
