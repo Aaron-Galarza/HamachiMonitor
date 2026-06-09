@@ -9,7 +9,9 @@
 # ============================================================
 
 param(
-    [string]$LogFile = (Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) "hamachi_watchdog.log")
+    [string]$LogFile = (Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) "hamachi_watchdog.log"),
+    [string]$TargetNetwork = "",
+    [string]$targetIP      = ""
 )
 
 $HAMACHI        = "C:\Program Files (x86)\LogMeIn Hamachi\x64\hamachi-2.exe"
@@ -45,16 +47,22 @@ function Rotate-Log {
 #   .Offline      : lista de nombres de redes offline
 
 function Get-HamachiState {
-    $raw     = & $HAMACHI --cli list 2>&1
-    $state   = @{ PoweredOn = $false; Online = @(); Offline = @() }
+    $raw   = & $HAMACHI --cli list 2>&1
+    $state = @{ PoweredOn = $false; Online = @(); Offline = @() }
 
     foreach ($line in $raw) {
         if ($line -match '^\s*\*\s*\[(.+?)\]') {
             $state.PoweredOn = $true
-            $state.Online   += $Matches[1]
+            $netName = $Matches[1]
+            if (-not $TargetNetwork -or $netName -eq $TargetNetwork) {
+                $state.Online += $netName
+            }
         } elseif ($line -match '^\s*\[(.+?)\]') {
             $state.PoweredOn = $true
-            $state.Offline  += $Matches[1]
+            $netName = $Matches[1]
+            if (-not $TargetNetwork -or $netName -eq $TargetNetwork) {
+                $state.Offline += $netName
+            }
         }
     }
     return $state
@@ -91,7 +99,8 @@ function Restore-Hamachi {
 $logDir = Split-Path $LogFile
 if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir | Out-Null }
 
-Write-Log "=== Watchdog iniciado | Chequeo cada ${CHECK_INTERVAL}s | Recuperacion tras $FAIL_THRESHOLD fallos ==="
+$scope = if ($TargetNetwork) { "Red: $TargetNetwork | IP: $TargetIP" } else { "Todas las redes" }
+Write-Log "=== Watchdog iniciado | $scope | Chequeo cada ${CHECK_INTERVAL}s | Recuperacion tras $FAIL_THRESHOLD fallos ==="
 
 $failCount = 0
 
@@ -110,7 +119,8 @@ while ($true) {
     } else {
         $failCount = 0
         $onlineList = $state.Online -join ", "
-        Write-Log "OK - Redes online: $onlineList"
+        $ipInfo = if ($TargetIP) { " | IP: $TargetIP" } else { "" }
+        Write-Log "OK - Red online: $onlineList$ipInfo"
     }
 
     if ($failCount -ge $FAIL_THRESHOLD) {

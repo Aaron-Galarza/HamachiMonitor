@@ -152,9 +152,9 @@ $selModo = Read-Host
 if ($selModo -eq "1") {
     # Arrancar watchdog como job en esta sesion
     $job = Start-Job -ScriptBlock {
-        param($script)
-        powershell -ExecutionPolicy Bypass -File $script
-    } -ArgumentList $watchdogScript
+        param($script, $red, $ip)
+        powershell -ExecutionPolicy Bypass -File $script -TargetNetwork $red -TargetIP $ip
+    } -ArgumentList $watchdogScript, $selName, $targetIP
     Write-Host "  Watchdog iniciado en esta sesion (Job ID: $($job.Id))." -ForegroundColor Green
 
 } elseif ($selModo -eq "2") {
