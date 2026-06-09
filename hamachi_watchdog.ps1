@@ -1,23 +1,21 @@
 # ============================================================
-#  Hamachi Watchdog - by Aaron Galarza
-#  github.com/Aaron-Galarza
+#  Hamachi Watchdog
+#  by Aaron Galarza — github.com/Aaron-Galarza
 #
-#  Verifica conectividad Hamachi cada 30s.
-#  Reinicia el servicio tras 3 fallos consecutivos.
+#  Verifica estado de Hamachi cada 30s.
+#  Si detecta redes offline o Hamachi apagado, las reactiva.
 # ============================================================
 
 param(
-    [string]$TargetIP = "",
-    [string]$LogFile  = "C:\HamachiMonitor\hamachi_watchdog.log"
+    [string]$LogFile = "C:\HamachiMonitor\hamachi_watchdog.log"
 )
 
-$HAMACHI_SVC    = "Hamachi2Svc"
-$HAMACHI_GUI    = "C:\Program Files (x86)\LogMeIn Hamachi\hamachi-2-ui.exe"
+$HAMACHI        = "C:\Program Files (x86)\LogMeIn Hamachi\x64\hamachi-2.exe"
 $MAX_LOG_KB     = 512
 $CHECK_INTERVAL = 30
 $FAIL_THRESHOLD = 3
 
-# ── Helpers ─────────────────────────────────────────────────
+# ── Helpers ──────────────────────────────────────────────────
 
 function Write-Log {
     param([string]$msg, [string]$level = "INFO")
@@ -38,94 +36,94 @@ function Rotate-Log {
     }
 }
 
-function Test-HamachiPing {
-    param([string]$ip)
-    $result = ping -n 2 -w 3000 $ip 2>&1
-    return ($result -match "TTL=")
-}
+# ── Parsear estado de Hamachi ─────────────────────────────────
+# Devuelve objeto con:
+#   .PoweredOn    : bool
+#   .Online       : lista de nombres de redes online
+#   .Offline      : lista de nombres de redes offline
 
-function Get-FirstPeerIP {
-    $hamachi = "C:\Program Files (x86)\LogMeIn Hamachi\x64\hamachi-2.exe"
-    $raw = & $hamachi --cli list 2>&1
+function Get-HamachiState {
+    $raw     = & $HAMACHI --cli list 2>&1
+    $state   = @{ PoweredOn = $false; Online = @(); Offline = @() }
+
     foreach ($line in $raw) {
-        if ($line -match '(\d+\.\d+\.\d+\.\d+)') {
-            return $Matches[1]
+        if ($line -match '^\s*\*\s*\[(.+?)\]') {
+            $state.PoweredOn = $true
+            $state.Online   += $Matches[1]
+        } elseif ($line -match '^\s*\[(.+?)\]') {
+            $state.PoweredOn = $true
+            $state.Offline  += $Matches[1]
         }
     }
-    return $null
+    return $state
 }
 
-function Restart-Hamachi {
-    Write-Log "Reiniciando Hamachi..." "WARN"
+# ── Recuperar Hamachi ─────────────────────────────────────────
 
-    $gui = Get-Process -Name "hamachi-2-ui" -ErrorAction SilentlyContinue
-    if ($gui) { $gui | Stop-Process -Force; Write-Log "GUI cerrada." }
+function Restore-Hamachi {
+    param($state)
 
-    Stop-Service -Name $HAMACHI_SVC -Force -ErrorAction SilentlyContinue
-    Start-Sleep -Seconds 5
-    Start-Service -Name $HAMACHI_SVC -ErrorAction SilentlyContinue
-    Start-Sleep -Seconds 8
-
-    $svc = Get-Service -Name $HAMACHI_SVC
-    if ($svc.Status -ne "Running") {
-        Write-Log "FALLO: el servicio no levanto despues del reinicio." "ERROR"
-        return $false
-    }
-    Write-Log "Servicio reiniciado OK."
-
-    $sessions = query session 2>&1 | Select-String "Active"
-    if ($sessions) {
-        Start-Process -FilePath $HAMACHI_GUI -ArgumentList "--auto-start" -WindowStyle Minimized
-        Write-Log "GUI relanzada."
-    } else {
-        Write-Log "Sin sesion interactiva activa, GUI no relanzada."
+    # 1. Si esta apagado, encender
+    if (-not $state.PoweredOn) {
+        Write-Log "Hamachi apagado. Ejecutando logon..." "WARN"
+        & $HAMACHI --cli logon | Out-Null
+        Start-Sleep -Seconds 5
+        Write-Log "Logon ejecutado."
+        # Re-parsear estado tras logon
+        $state = Get-HamachiState
     }
 
-    return $true
+    # 2. Reconectar redes offline
+    if ($state.Offline.Count -gt 0) {
+        foreach ($net in $state.Offline) {
+            Write-Log "Red offline: '$net'. Reconectando..." "WARN"
+            & $HAMACHI --cli go-online $net | Out-Null
+            Start-Sleep -Seconds 3
+            Write-Log "go-online '$net' ejecutado."
+        }
+    }
 }
 
-# ── Resoler IP target ────────────────────────────────────────
+# ── Main loop ─────────────────────────────────────────────────
 
 $logDir = Split-Path $LogFile
 if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir | Out-Null }
 
-if (-not $TargetIP) {
-    $TargetIP = Get-FirstPeerIP
-    if (-not $TargetIP) {
-        Write-Log "No se pudo detectar ningun peer. Verifica que Hamachi este conectado." "ERROR"
-        exit 1
-    }
-    Write-Log "IP target detectada automaticamente: $TargetIP"
-}
-
-# ── Main loop ────────────────────────────────────────────────
-
-Write-Log "=== Watchdog iniciado. Target: $TargetIP | Chequeo cada ${CHECK_INTERVAL}s | Reinicio tras $FAIL_THRESHOLD fallos consecutivos ==="
+Write-Log "=== Watchdog iniciado | Chequeo cada ${CHECK_INTERVAL}s | Recuperacion tras $FAIL_THRESHOLD fallos ==="
 
 $failCount = 0
 
 while ($true) {
     Rotate-Log
 
-    if (Test-HamachiPing $TargetIP) {
-        $failCount = 0
-        Write-Log "OK - ping a $TargetIP respondio."
-    } else {
+    $state = Get-HamachiState
+
+    if (-not $state.PoweredOn) {
         $failCount++
-        Write-Log "FALLO $failCount/$FAIL_THRESHOLD - sin respuesta de $TargetIP." "WARN"
+        Write-Log "FALLO $failCount/$FAIL_THRESHOLD - Hamachi apagado." "WARN"
+    } elseif ($state.Offline.Count -gt 0) {
+        $failCount++
+        $offlineList = $state.Offline -join ", "
+        Write-Log "FALLO $failCount/$FAIL_THRESHOLD - Redes offline: $offlineList" "WARN"
+    } else {
+        $failCount = 0
+        $onlineList = $state.Online -join ", "
+        Write-Log "OK - Redes online: $onlineList"
+    }
 
-        if ($failCount -ge $FAIL_THRESHOLD) {
-            Write-Log "CRITICO - $FAIL_THRESHOLD fallos consecutivos. Reiniciando Hamachi..." "ERROR"
-            $ok = Restart-Hamachi
-            $failCount = 0
+    if ($failCount -ge $FAIL_THRESHOLD) {
+        Write-Log "CRITICO - $FAIL_THRESHOLD fallos consecutivos. Recuperando Hamachi..." "ERROR"
+        Restore-Hamachi $state
+        $failCount = 0
 
-            Start-Sleep -Seconds 20
+        Start-Sleep -Seconds 10
 
-            if ($ok -and (Test-HamachiPing $TargetIP)) {
-                Write-Log "RECUPERADO - ping OK tras reinicio."
-            } else {
-                Write-Log "CRITICO - sigue sin ping tras reinicio. Revisar manualmente." "ERROR"
-            }
+        # Verificacion post-recuperacion
+        $statePost = Get-HamachiState
+        if ($statePost.PoweredOn -and $statePost.Offline.Count -eq 0) {
+            Write-Log "RECUPERADO - todas las redes online: $($statePost.Online -join ', ')"
+        } else {
+            Write-Log "CRITICO - no se pudo recuperar. Revisar manualmente." "ERROR"
         }
     }
 
