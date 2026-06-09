@@ -3,8 +3,13 @@
 #  by Aaron Galarza — github.com/Aaron-Galarza
 # ============================================================
 
-$HAMACHI  = "C:\Program Files (x86)\LogMeIn Hamachi\x64\hamachi-2.exe"
-$LOG_FILE = "C:\HamachiMonitor\hamachi_watchdog.log"
+param(
+    [switch]$Test
+)
+
+$HAMACHI    = "C:\Program Files (x86)\LogMeIn Hamachi\x64\hamachi-2.exe"
+$SCRIPT_DIR = Split-Path -Parent $MyInvocation.MyCommand.Path
+$LOG_FILE   = if ($Test) { Join-Path $SCRIPT_DIR "hamachi_watchdog.log" } else { "C:\HamachiMonitor\hamachi_watchdog.log" }
 
 function Show-Header {
     param([string]$subtitle = "")
@@ -90,20 +95,40 @@ if ($sel -eq "0") {
     }
 
     Write-Host ""
-    if ($suggestedIP) {
-        Write-Host ("  IP target para monitorear [Enter para usar " + $suggestedIP + "]: ") -ForegroundColor Cyan -NoNewline
-    } else {
-        Write-Host "  IP target para monitorear: " -ForegroundColor Cyan -NoNewline
+    Write-Host " Peers en '$($net.Name)':" -ForegroundColor Yellow
+    $peerIPs = @()
+    foreach ($p in $net.Peers) {
+        if ($p -match '\*?\s*\S+\s+(\S+)\s+(\d+\.\d+\.\d+\.\d+)') {
+            $peerIPs += $Matches[2]
+            Write-Host ("   [" + $peerIPs.Count + "] " + $Matches[1].PadRight(25) + $Matches[2]) -ForegroundColor Gray
+        }
     }
-    $inputIP = Read-Host
 
-    if ($inputIP -eq "" -and $suggestedIP) {
-        $targetIP = $suggestedIP
-    } elseif ($inputIP -match '^\d+\.\d+\.\d+\.\d+$') {
-        $targetIP = $inputIP
+    Write-Host ""
+    if ($peerIPs.Count -ge 1) {
+        Write-Host ("  Selecciona peer a targetear (1-" + $peerIPs.Count + ") o Enter para el primero: ") -ForegroundColor Cyan -NoNewline
+        $selPeer = Read-Host
+        if ($selPeer -eq "") {
+            $targetIP = $peerIPs[0]
+        } elseif ($selPeer -match '^\d+$' -and [int]$selPeer -ge 1 -and [int]$selPeer -le $peerIPs.Count) {
+            $targetIP = $peerIPs[[int]$selPeer - 1]
+        } else {
+            Write-Host "  Seleccion invalida." -ForegroundColor Red
+            exit
+        }
     } else {
-        Write-Host "  IP invalida." -ForegroundColor Red
+        Write-Host "  No hay peers conectados en esta red." -ForegroundColor Red
         exit
+    }
+
+    # Verificacion rapida de ping antes de arrancar
+    Write-Host ""
+    Write-Host ("  Verificando ping a " + $targetIP + "...") -ForegroundColor DarkGray -NoNewline
+    $pingOk = (ping -n 1 -w 2000 $targetIP 2>&1) -match "TTL="
+    if ($pingOk) {
+        Write-Host " OK" -ForegroundColor Green
+    } else {
+        Write-Host " Sin respuesta (puede estar offline)" -ForegroundColor Yellow
     }
 } else {
     Write-Host "  Seleccion invalida." -ForegroundColor Red
@@ -111,24 +136,77 @@ if ($sel -eq "0") {
 }
 
 # ── Actualizar watchdog con la IP elegida ────────────────────
-if ($targetIP) {
-    $watchdogScript = "C:\HamachiMonitor\hamachi_watchdog.ps1"
-    $wContent = Get-Content $watchdogScript -Raw
-    # Reemplazar el parametro TargetIP en la tarea programada
-    $taskAction = New-ScheduledTaskAction `
-        -Execute "powershell.exe" `
-        -Argument "-NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$watchdogScript`" -TargetIP `"$targetIP`""
-    Set-ScheduledTask -TaskName "HamachiWatchdog" -Action $taskAction -ErrorAction SilentlyContinue | Out-Null
+# ── Modo watchdog ─────────────────────────────────────────────
+$watchdogScript = if ($Test) { Join-Path $SCRIPT_DIR "hamachi_watchdog.ps1" } else { "C:\HamachiMonitor\hamachi_watchdog.ps1" }
+
+Write-Host ""
+Write-Host "  MODO WATCHDOG:" -ForegroundColor Yellow
+Write-Host "  ------------------------------------------------------" -ForegroundColor DarkGray
+Write-Host "  [1] Solo esta sesion    (se detiene al cerrar terminal)" -ForegroundColor White
+Write-Host "  [2] Siempre automatico  (corre aunque no haya sesion)  " -ForegroundColor White
+Write-Host "  [3] Desactivar watchdog automatico                     " -ForegroundColor White
+Write-Host ""
+Write-Host "  Selecciona modo (1-3): " -ForegroundColor Cyan -NoNewline
+$selModo = Read-Host
+
+if ($selModo -eq "1") {
+    # Arrancar watchdog como job en esta sesion
+    $job = Start-Job -ScriptBlock {
+        param($script)
+        powershell -ExecutionPolicy Bypass -File $script
+    } -ArgumentList $watchdogScript
+    Write-Host "  Watchdog iniciado en esta sesion (Job ID: $($job.Id))." -ForegroundColor Green
+
+} elseif ($selModo -eq "2") {
+    # Registrar o actualizar tarea programada
+    if ($Test) {
+        Write-Host "  [TEST] Se omite registro de tarea programada." -ForegroundColor DarkGray
+    } else {
+        $taskAction = New-ScheduledTaskAction `
+            -Execute "powershell.exe" `
+            -Argument "-NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$watchdogScript`""
+        if (Get-ScheduledTask -TaskName "HamachiWatchdog" -ErrorAction SilentlyContinue) {
+            Set-ScheduledTask -TaskName "HamachiWatchdog" -Action $taskAction | Out-Null
+        } else {
+            Write-Host "  No existe tarea programada. Ejecuta el instalador primero." -ForegroundColor Red
+            exit
+        }
+        Start-ScheduledTask -TaskName "HamachiWatchdog"
+        Write-Host "  Watchdog automatico activado." -ForegroundColor Green
+    }
+
+} elseif ($selModo -eq "3") {
+    # Desactivar tarea programada y matar procesos watchdog
+    if ($Test) {
+        Write-Host "  [TEST] Se omite desactivacion de tarea programada." -ForegroundColor DarkGray
+    } else {
+        Stop-ScheduledTask -TaskName "HamachiWatchdog" -ErrorAction SilentlyContinue
+        Write-Host "  Watchdog automatico desactivado." -ForegroundColor Green
+    }
+    # Matar jobs de watchdog de esta sesion si existen
+    Get-Job | Where-Object { $_.State -eq "Running" } | Stop-Job
+    Get-Job | Remove-Job
+    Write-Host "  Jobs de sesion detenidos." -ForegroundColor Green
+    exit
+
+} else {
+    Write-Host "  Seleccion invalida." -ForegroundColor Red
+    exit
 }
 
 # ── Pantalla de auditoria ────────────────────────────────────
-Show-Header $selName
+# ── Pantalla de auditoria ────────────────────────────────────
+Write-Host ""
+Write-Host ("  Red    : " + $selName) -ForegroundColor White
 if ($targetIP) { Write-Host ("  Target : " + $targetIP) -ForegroundColor White }
 Write-Host ("  Log    : " + $LOG_FILE) -ForegroundColor DarkGray
 Write-Host ""
 Write-Host "  Ctrl+C para salir" -ForegroundColor DarkGray
 Write-Host "  ------------------------------------------------------" -ForegroundColor DarkGray
 Write-Host ""
+
+if (-not (Test-Path $LOG_FILE)) { New-Item -ItemType File -Path $LOG_FILE -Force | Out-Null }
+Get-Content $LOG_FILE -Wait
 
 Clear-Content $LOG_FILE -ErrorAction SilentlyContinue
 Get-Content $LOG_FILE -Wait

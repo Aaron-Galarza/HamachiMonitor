@@ -1,3 +1,5 @@
+## produccion
+
 # ============================================================
 #  Hamachi Watchdog
 #  by Aaron Galarza — github.com/Aaron-Galarza
@@ -7,12 +9,12 @@
 # ============================================================
 
 param(
-    [string]$LogFile = "C:\HamachiMonitor\hamachi_watchdog.log"
+    [string]$LogFile = (Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) "hamachi_watchdog.log")
 )
 
 $HAMACHI        = "C:\Program Files (x86)\LogMeIn Hamachi\x64\hamachi-2.exe"
 $MAX_LOG_KB     = 512
-$CHECK_INTERVAL = 30
+$CHECK_INTERVAL = 5
 $FAIL_THRESHOLD = 3
 
 # ── Helpers ──────────────────────────────────────────────────
